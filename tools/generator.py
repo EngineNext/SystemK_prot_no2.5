@@ -8,7 +8,9 @@ from dotenv import load_dotenv
 # --- 設定 ---
 # .envファイルからAPIキーを読み込むか、ここに直接書く（非推奨だがテスト用なら可）
 # os.environ["GOOGLE_API_KEY"] = "ここにGeminiのAPIキーを入れる"
-load_dotenv()
+# .envファイルを、このファイル(generator.py)の「一つ上の階層」から探す命令
+env_path = os.path.join(os.path.dirname(__file__), '../.env')
+load_dotenv(env_path)
 
 # Geminiの設定
 genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
@@ -19,7 +21,7 @@ PDF_DIR = os.path.join(os.path.dirname(__file__), 'pdfs')
 OUTPUT_FILE = os.path.join(os.path.dirname(__file__), '../js/data.js')
 
 def extract_text_from_pdf(pdf_path):
-    print(f"📄 Reading: {os.path.basename(pdf_path)}...")
+    print(f"[READ] Reading: {os.path.basename(pdf_path)}...")
     reader = PdfReader(pdf_path)
     text = ""
     # 全ページ読むと長すぎる場合があるので、入試科目がありそうなページ（P10-50など）に絞るのも手
@@ -29,7 +31,7 @@ def extract_text_from_pdf(pdf_path):
     return text
 
 def generate_university_data(text):
-    print("🤖 Analyzing with Gemini...")
+    print(f"[AI] Analyzing with Gemini...")
     
     prompt = """
     あなたは大学入試のデータアナリストです。
@@ -79,7 +81,7 @@ def generate_university_data(text):
             
         return json.loads(json_str)
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"[ERROR] Error: {e}")
         return []
 
 def save_to_js(universities_data):
@@ -127,7 +129,7 @@ const subjectMaster = {
     
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         f.write(js_content)
-    print(f"✅ Updated {OUTPUT_FILE} with {len(universities_data)} universities!")
+    print(f"[DONE] Updated {OUTPUT_FILE} with {len(universities_data)} universities!")
 
 def main():
     all_universities = []
@@ -136,7 +138,7 @@ def main():
     pdf_files = glob.glob(os.path.join(PDF_DIR, "*.pdf"))
     
     if not pdf_files:
-        print("⚠️ No PDF files found in tools/pdfs/")
+        print("[WARN] No PDF files found in tools/pdfs/")
         return
 
     for pdf_path in pdf_files:
