@@ -1,94 +1,145 @@
 import os
 import json
 import glob
+import re
 from pypdf import PdfReader
 import google.generativeai as genai
 from dotenv import load_dotenv
+import time
 
 # --- 設定 ---
-# .envファイルからAPIキーを読み込むか、ここに直接書く（非推奨だがテスト用なら可）
-# os.environ["GOOGLE_API_KEY"] = "ここにGeminiのAPIキーを入れる"
-# .envファイルを、このファイル(generator.py)の「一つ上の階層」から探す命令
-env_path = os.path.join(os.path.dirname(__file__), '../.env')
-load_dotenv(env_path)
+# .envファイルを読み込む
+# ※実行ディレクトリにあれば自動で見つけますが、念のため明示的に読み込む
+load_dotenv()
 
-# Geminiの設定
+# APIキーの確認
+if "GOOGLE_API_KEY" not in os.environ:
+    print("[ERROR] GOOGLE_API_KEY not found. Please check your .env file.")
+    exit(1)
+
 genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
-model = genai.GenerativeModel('gemini-1.5-pro-latest')
 
-# フォルダ設定
+# モデル設定 (高速なFlashモデル)
+model = genai.GenerativeModel('gemini-1.5-flash')
+
+# パス設定
 PDF_DIR = os.path.join(os.path.dirname(__file__), 'pdfs')
 OUTPUT_FILE = os.path.join(os.path.dirname(__file__), '../js/data.js')
 
-def extract_text_from_pdf(pdf_path):
+def extract_relevant_text(pdf_path):
     print(f"[READ] Reading: {os.path.basename(pdf_path)}...")
-    reader = PdfReader(pdf_path)
-    text = ""
-    # 全ページ読むと長すぎる場合があるので、入試科目がありそうなページ（P10-50など）に絞るのも手
-    # 今回は全ページ読む
-    for page in reader.pages:
-        text += page.extract_text() + "\n"
-    return text
+    try:
+        reader = PdfReader(pdf_path)
+        relevant_text = ""
+        hit_pages = 0
+        keywords = ["配点", "共通テスト", "個別学力検査", "科目", "選抜方法"]
+        
+        for i, page in enumerate(reader.pages):
+            text = page.extract_text()
+            if not text: continue
+            score = sum(1 for k in keywords if k in text)
+            if score >= 2:
+                print(f"  - Page {i+1} seems relevant (score: {score})")
+                relevant_text += f"\n--- Page {i+1} ---\n{text}"
+                hit_pages += 1
+            if hit_pages >= 5: break
+        
+        if hit_pages == 0:
+            print("  [WARN] No relevant pages found. Reading first 10 pages.")
+            for i in range(min(10, len(reader.pages))):
+                relevant_text += reader.pages[i].extract_text() + "\n"
+        return relevant_text
+    except Exception as e:
+        print(f"[ERROR] PDF Error: {e}")
+        return ""
 
 def generate_university_data(text):
-    print(f"[AI] Analyzing with Gemini...")
-    
+    if not text: return []
+    print(f"[AI] Analyzing {len(text)} chars with Gemini...")
+    time.sleep(2) 
+
     prompt = """
-    あなたは大学入試のデータアナリストです。
-    以下の「募集要項」のテキストデータから、指定されたJSONフォーマットでデータを抽出してください。
+    以下のテキストは大学入試要項の抜粋です。
+    ここから「学部・学科ごとの入試配点データ」を抽出し、指定のJSON形式のみを出力してください。
     
-    【抽出ルール】
-    1. 学部・学科ごと、入試方式ごとにデータを分けること。
-    2. 科目の配点（weights）は、共通テストの配点比率を抽出すること。
-       - 特に記述がなければ標準を「1」とする。
-       - 英語のリーディング(R)とリスニング(L)の比率は慎重に判定すること。
-    3. 合格最低点やボーダー得点率（borderScoreRate）がテキストにあれば抽出。なければ 0.65 (65%) と推測して入れること。
+    【重要：配点の扱い】
+    - 「共通テスト」と「個別試験（2次）」の配点比率が必要です。
+    - 科目名（englishR, math1Aなど）は文脈から推測してマッピングしてください。
+    - 英語のRとLの比率が不明な場合は 1:1 と仮定してください。
     
-    【出力フォーマット】
-    以下のJSON配列形式のみを出力してください。Markdownタグ（```json）は不要です。
-    
+    【JSON出力例】
     [
         {
             "name": "大学名",
             "faculty": "学部名",
-            "field": ["science" | "humanities" などの分野タグを2-3個推測],
+            "field": ["science"],
             "exams": [
                 {
-                    "type": "入試方式名 (例: 前期, A方式)",
-                    "borderScoreRate": 0.75,
-                    "desc": "方式の特徴を20文字程度で要約",
-                    "weights": {
-                        "englishR": 1, "englishL": 1, "math1A": 1, "math2BC": 1,
-                        "science1": 1, "science2": 1, "social": 1, "info": 1,
-                        "jp_modern": 1, "jp_ancient": 1, "jp_kanbun": 1
-                    }
+                    "type": "一般選抜前期",
+                    "borderScoreRate": 0.75, 
+                    "desc": "共通テスト重視",
+                    "weights": {"englishR":1, "math1A":1}
                 }
             ]
         }
     ]
     
     【対象テキスト】
-    """ + text[:30000] # 文字数制限対策（長すぎるとエラーになるため冒頭3万文字）
+    """ + text
 
     try:
         response = model.generate_content(prompt)
-        # JSON部分だけを取り出す簡易的な処理
         json_str = response.text.strip()
         if "```json" in json_str:
             json_str = json_str.split("```json")[1].split("```")[0]
         elif "```" in json_str:
             json_str = json_str.split("```")[1].split("```")[0]
-            
         return json.loads(json_str)
     except Exception as e:
-        print(f"[ERROR] Error: {e}")
+        print(f"[ERROR] AI Error: {e}")
         return []
 
-def save_to_js(universities_data):
-    # 既存の静的データ（JS側の設定など）は残しつつ、universities配列だけ書き換える必要があるが
-    # 今回は data.js を「universities定義専用」にしたので丸ごと上書きする
+# --- 既存データの読み込み ---
+def load_existing_data():
+    if not os.path.exists(OUTPUT_FILE):
+        return []
     
-    # 既存の固定データを定義（消したくない定数など）
+    try:
+        with open(OUTPUT_FILE, 'r', encoding='utf-8') as f:
+            content = f.read()
+            # 正規表現で const universities = [...]; の中身を取り出す
+            match = re.search(r'const universities = (\[.*?\]);', content, re.DOTALL)
+            if match:
+                return json.loads(match.group(1))
+    except Exception as e:
+        print(f"[WARN] Could not load existing data: {e}")
+    
+    return []
+
+# --- データ保存（マージ機能付き） ---
+def save_to_js(new_data):
+    # 1. 既存データをロード
+    current_data = load_existing_data()
+    print(f"[INFO] Loaded {len(current_data)} existing universities.")
+    
+    # 2. データをマージ
+    data_map = {(u['name'], u['faculty']): u for u in current_data}
+    
+    added_count = 0
+    updated_count = 0
+    
+    for uni in new_data:
+        key = (uni['name'], uni['faculty'])
+        if key in data_map:
+            data_map[key] = uni # 更新
+            updated_count += 1
+        else:
+            data_map[key] = uni # 追加
+            added_count += 1
+    
+    merged_list = list(data_map.values())
+    
+    # 3. 書き込み
     header_content = """// --- Data Definitions ---
 // Auto-generated by tools/generator.py
 
@@ -123,18 +174,14 @@ const subjectMaster = {
     scienceBasic: { name: '理科基礎', max: 100, table: 'science' }
 };
 """
-
-    # 自動生成されたデータを追記
-    js_content = header_content + "\nconst universities = " + json.dumps(universities_data, indent=4, ensure_ascii=False) + ";"
+    js_content = header_content + "\nconst universities = " + json.dumps(merged_list, indent=4, ensure_ascii=False) + ";"
     
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         f.write(js_content)
-    print(f"[DONE] Updated {OUTPUT_FILE} with {len(universities_data)} universities!")
+    print(f"[DONE] Data Saved! (New: {added_count}, Updated: {updated_count}, Total: {len(merged_list)})")
 
 def main():
     all_universities = []
-    
-    # pdfsフォルダ内のPDFを全走査
     pdf_files = glob.glob(os.path.join(PDF_DIR, "*.pdf"))
     
     if not pdf_files:
@@ -142,13 +189,16 @@ def main():
         return
 
     for pdf_path in pdf_files:
-        text = extract_text_from_pdf(pdf_path)
+        text = extract_relevant_text(pdf_path)
         if text:
             data = generate_university_data(text)
             all_universities.extend(data)
     
-    # JSファイルに書き込み
-    save_to_js(all_universities)
+    if all_universities:
+        save_to_js(all_universities)
+    else:
+        print("[WARN] No university data was generated.")
 
 if __name__ == "__main__":
+    main()if __name__ == "__main__":
     main()
